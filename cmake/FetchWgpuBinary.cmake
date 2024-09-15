@@ -29,10 +29,76 @@ if (TARGET webgpu)
 	return()
 endif()
 
-set(WGPU_LINK_TYPE "DYNAMIC" CACHE STRING "Whether the wgpu-native WebGPU implementation must be statically or dynamically linked. Possible values are STATIC and DYNAMIC")
-set(WGPU_VERSION "v0.19.3.1" CACHE STRING "Version of the wgpu-native WebGPU implementation to use. Must correspond to the tag name of an existing release on https://github.com/gfx-rs/wgpu-native/releases")
+set(WGPU_LINK_TYPE "SHARED" CACHE STRING "Whether the wgpu-native WebGPU implementation must be statically or dynamically linked. Possible values are STATIC and SHARED")
+set(WGPU_VERSION "v22.1.0.5" CACHE STRING "Version of the wgpu-native WebGPU implementation to use. Must correspond to the tag name of an existing release on https://github.com/gfx-rs/wgpu-native/releases")
+
+# Target architecture detection (thank you CMake for not providing that...)
+function(detect_system_architecture)
+	if (NOT ARCH)
+		set(SYSTEM_PROCESSOR ${CMAKE_SYSTEM_PROCESSOR})
+		if (SYSTEM_PROCESSOR STREQUAL "AMD64" OR SYSTEM_PROCESSOR STREQUAL "x86_64")
+			if (CMAKE_SIZEOF_VOID_P EQUAL 8)
+				set(ARCH "x86_64")
+			elseif (CMAKE_SIZEOF_VOID_P EQUAL 4)
+				set(ARCH "i686")
+			endif()
+		elseif (SYSTEM_PROCESSOR STREQUAL "arm64")
+			set(ARCH "aarch64")
+		endif()
+	endif()
+	set(ARCH "${ARCH}" PARENT_SCOPE)
+endfunction()
+
+# Create the name of the static or shared library file given the target system.
+function(build_lib_filename OUT_VAR LIB_NAME USE_SHARED_LIB)
+	set(STATIC_LIB_EXT)
+	set(SHARED_LIB_EXT)
+	set(STATIC_LIB_PREFIX)
+	set(SHARED_LIB_PREFIX)
+
+	if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+
+		set(SHARED_LIB_EXT "dll")
+		if (MSVC)
+			set(STATIC_LIB_EXT "lib")
+		else()
+			set(STATIC_LIB_EXT "a")
+			set(STATIC_LIB_PREFIX "lib")
+		endif()
+
+	elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+
+		set(STATIC_LIB_EXT "a")
+		set(SHARED_LIB_EXT "so")
+		set(STATIC_LIB_PREFIX "lib")
+		set(SHARED_LIB_PREFIX "lib")
+
+	elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+
+		set(STATIC_LIB_EXT "a")
+		set(SHARED_LIB_EXT "dylib")
+		set(STATIC_LIB_PREFIX "lib")
+		set(SHARED_LIB_PREFIX "lib")
+
+	else()
+
+		message(FATAL_ERROR "Platform system '${CMAKE_SYSTEM_NAME}' not supported.")
+
+	endif()
+
+	if (USE_SHARED_LIB)
+		set(${OUT_VAR} "${SHARED_LIB_PREFIX}${LIB_NAME}.${SHARED_LIB_EXT}" PARENT_SCOPE)
+	else()
+		set(${OUT_VAR} "${STATIC_LIB_PREFIX}${LIB_NAME}.${STATIC_LIB_EXT}" PARENT_SCOPE)
+	endif()
+endfunction()
 
 if (EMSCRIPTEN)
+	# When using emscripten, we do not download any WebGPU implementation
+	# because emscripten will convert all calls to the WebGPU API into their
+	# equivalent JavaScript counterpart, and the actual implementation is
+	# provided by the client's Web browser (it is not shipped with our WASM
+	# module).
 
 	add_library(webgpu INTERFACE)
 
@@ -51,51 +117,42 @@ if (EMSCRIPTEN)
 	endfunction()
 
 else (EMSCRIPTEN)
+	# Not using emscripten, so we download binaries. There are many different
+	# combinations of OS, CPU architecture and compiler (the later is only
+	# relevant when using static linking), so here are a lot of boring "if".
 
-	if (NOT ARCH)
-		set(ARCH ${CMAKE_SYSTEM_PROCESSOR})
-		if (ARCH STREQUAL "AMD64")
-			set(ARCH "x86_64")
-		endif()
-	endif()
+	detect_system_architecture()
 
-	set(USE_DYNAMIC_LIB)
-	if (WGPU_LINK_TYPE STREQUAL "DYNAMIC")
-		set(USE_DYNAMIC_LIB TRUE)
+	# Check 'WGPU_LINK_TYPE' argument
+	set(USE_SHARED_LIB)
+	if (WGPU_LINK_TYPE STREQUAL "SHARED")
+		set(USE_SHARED_LIB TRUE)
 	elseif (WGPU_LINK_TYPE STREQUAL "STATIC")
-		set(USE_DYNAMIC_LIB FALSE)
+		set(USE_SHARED_LIB FALSE)
 	else()
-		message(FATAL_ERROR "Link type '${WGPU_LINK_TYPE}' is not valid. Possible values for WGPU_LINK_TYPE are DYNAMIC and STATIC.")
+		message(FATAL_ERROR "Link type '${WGPU_LINK_TYPE}' is not valid. Possible values for WGPU_LINK_TYPE are SHARED and STATIC.")
 	endif()
 
+	# Build URL to fetch
 	set(URL_OS)
-	set(BINARY_FILENAME)
+	set(URL_COMPILER)
 	if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
 
-		set(URL_OS windows)
-		if (USE_DYNAMIC_LIB)
-			set(BINARY_FILENAME "wgpu_native.dll")
+		set(URL_OS "windows")
+
+		if (MSVC)
+			set(URL_COMPILER "msvc")
 		else()
-			set(BINARY_FILENAME "wgpu_native.lib")
+			set(URL_COMPILER "gnu")
 		endif()
 
 	elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
 
-		set(URL_OS linux)
-		if (USE_DYNAMIC_LIB)
-			set(BINARY_FILENAME "libwgpu_native.so")
-		else()
-			set(BINARY_FILENAME "libwgpu_native.a")
-		endif()
+		set(URL_OS "linux")
 
-	elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+	elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
 
-		set(URL_OS macos)
-		if (USE_DYNAMIC_LIB)
-			set(BINARY_FILENAME "libwgpu_native.dylib")
-		else()
-			set(BINARY_FILENAME "libwgpu_native.a")
-		endif()
+		set(URL_OS "macos")
 
 	else()
 
@@ -106,7 +163,7 @@ else (EMSCRIPTEN)
 	set(URL_ARCH)
 	if (ARCH STREQUAL "x86_64")
 		set(URL_ARCH "x86_64")
-	elseif (ARCH STREQUAL "aarch64" AND NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+	elseif (ARCH STREQUAL "aarch64")
 		set(URL_ARCH "aarch64")
 	elseif (ARCH STREQUAL "i686" AND CMAKE_SYSTEM_NAME STREQUAL "Windows")
 		set(URL_ARCH "i686")
@@ -114,29 +171,31 @@ else (EMSCRIPTEN)
 		message(FATAL_ERROR "Platform architecture '${ARCH}' not supported by this release of WebGPU. You may consider building it yourself from its source (see https://github.com/gfx-rs/wgpu-native)")
 	endif()
 
+	# We only fetch release builds (NB: this may cause issue when using static
+	# linking, but not with dynamic)
 	set(URL_CONFIG release)
-	set(URL_NAME "wgpu-${URL_OS}-${URL_ARCH}-${URL_CONFIG}")
+
+	# Finally build the URL. The URL_NAME is also used as FetchContent
+	# identifier (BTW it must be lowercase).
+	if (URL_COMPILER)
+		set(URL_NAME "wgpu-${URL_OS}-${URL_ARCH}-${URL_COMPILER}-${URL_CONFIG}")
+	else()
+		set(URL_NAME "wgpu-${URL_OS}-${URL_ARCH}-${URL_CONFIG}")
+	endif()
 	set(URL "https://github.com/gfx-rs/wgpu-native/releases/download/${WGPU_VERSION}/${URL_NAME}.zip")
 
+	# Declare FetchContent, then make available
 	FetchContent_Declare(${URL_NAME}
 		URL ${URL}
 	)
-	message(STATUS "Downloading WebGPU runtime from '${URL}'")
+	# TODO: Display the "Fetching" message only when actually downloading
+	message(STATUS "Fetching WebGPU implementation from '${URL}'")
 	FetchContent_MakeAvailable(${URL_NAME})
 	set(ZIP_DIR "${${URL_NAME}_SOURCE_DIR}")
 
-	# Fix folder layout
-	file(MAKE_DIRECTORY "${ZIP_DIR}/include/webgpu")
-	if (EXISTS "${ZIP_DIR}/webgpu.h")
-		file(RENAME "${ZIP_DIR}/webgpu.h" "${ZIP_DIR}/include/webgpu/webgpu.h")
-	endif()
-	if (EXISTS "${ZIP_DIR}/wgpu.h")
-		file(RENAME "${ZIP_DIR}/wgpu.h" "${ZIP_DIR}/include/webgpu/wgpu.h")
-	endif()
-
-	# A pre-compiled target (IMPORTED) that is a dynamically
-	# linked library (SHARED, meaning .dll, .so or .dylib).
-	if (USE_DYNAMIC_LIB)
+	# A pre-compiled target (IMPORTED) that is a dynamically linked library
+	# (SHARED, meaning .dll, .so or .dylib) or statically linked (.a or .lib).
+	if (USE_SHARED_LIB)
 		add_library(webgpu SHARED IMPORTED GLOBAL)
 	else()
 		add_library(webgpu STATIC IMPORTED GLOBAL)
@@ -145,22 +204,29 @@ else (EMSCRIPTEN)
 	# This is used to advertise the flavor of WebGPU that this zip provides
 	target_compile_definitions(webgpu INTERFACE WEBGPU_BACKEND_WGPU)
 
-	set(WGPU_RUNTIME_LIB "${ZIP_DIR}/${BINARY_FILENAME}")
+	build_lib_filename(BINARY_FILENAME "wgpu_native" ${USE_SHARED_LIB})
+	set(WGPU_RUNTIME_LIB "${ZIP_DIR}/lib/${BINARY_FILENAME}")
 	set_target_properties(
 		webgpu
 		PROPERTIES
 			IMPORTED_LOCATION "${WGPU_RUNTIME_LIB}"
-			INTERFACE_INCLUDE_DIRECTORIES "${ZIP_DIR}/include"
+			INTERFACE_INCLUDE_DIRECTORIES "${ZIP_DIR}/include;${ZIP_DIR}/include/webgpu"  # see https://github.com/gfx-rs/wgpu-native/pull/424
 	)
 
-	if (USE_DYNAMIC_LIB)
+	if (USE_SHARED_LIB)
 
 		if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+
+			if (MSVC)
+				set(STATIC_LIB_EXT "lib")
+			else()
+				set(STATIC_LIB_EXT "a")
+			endif()
 
 			set_target_properties(
 				webgpu
 				PROPERTIES
-					IMPORTED_IMPLIB "${WGPU_RUNTIME_LIB}.lib"
+					IMPORTED_IMPLIB "${WGPU_RUNTIME_LIB}.${STATIC_LIB_EXT}"
 			)
 
 		elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -174,10 +240,9 @@ else (EMSCRIPTEN)
 		endif()
 
 		message(STATUS "Using WebGPU runtime from '${WGPU_RUNTIME_LIB}'")
-		#set(WGPU_RUNTIME_LIB ${WGPU_RUNTIME_LIB} PARENT_SCOPE)
 		set(WGPU_RUNTIME_LIB ${WGPU_RUNTIME_LIB} CACHE INTERNAL "Path to the WebGPU library binary")
 
-		# The application's binary must find wgpu.dll or libwgpu.so at runtime,
+		# The application's binary must find the .dll/.so/.dylib at runtime,
 		# so we automatically copy it (it's called WGPU_RUNTIME_LIB in general)
 		# next to the binary.
 		# Also make sure that the binary's RPATH is set to find this shared library.
@@ -213,11 +278,45 @@ else (EMSCRIPTEN)
 			endif()
 		endfunction()
 
-	else (USE_DYNAMIC_LIB)
+	else (USE_SHARED_LIB)
+
+		if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+
+			target_link_libraries(
+				webgpu
+				INTERFACE
+					d3dcompiler.lib
+					Ws2_32.lib
+					Userenv.lib
+					ntdll.lib
+					Bcrypt.lib
+					Opengl32.lib
+			)
+
+		elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+
+			target_link_libraries(
+				webgpu
+				INTERFACE
+					dl
+					pthread
+			)
+
+		elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+
+			target_link_libraries(
+				webgpu
+				INTERFACE
+					"-framework Metal"
+					"-framework QuartzCore"
+					"-framework MetalKit"
+			)
+
+		endif()
 
 		function(target_copy_webgpu_binaries Target)
 		endfunction()
 
-	endif (USE_DYNAMIC_LIB)
+	endif (USE_SHARED_LIB)
 
 endif (EMSCRIPTEN)
