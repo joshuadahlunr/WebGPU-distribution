@@ -219,14 +219,17 @@ else (EMSCRIPTEN)
 
 			if (MSVC)
 				set(STATIC_LIB_EXT "lib")
+				set(STATIC_LIB_PREFIX "")
 			else()
 				set(STATIC_LIB_EXT "a")
+				set(STATIC_LIB_PREFIX "lib")
 			endif()
 
+			set(WGPU_IMPLIB "${ZIP_DIR}/lib/${STATIC_LIB_PREFIX}${BINARY_FILENAME}.${STATIC_LIB_EXT}")
 			set_target_properties(
 				webgpu
 				PROPERTIES
-					IMPORTED_IMPLIB "${WGPU_RUNTIME_LIB}.${STATIC_LIB_EXT}"
+					IMPORTED_IMPLIB "${WGPU_IMPLIB}"
 			)
 
 		elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
